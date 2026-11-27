@@ -272,11 +272,7 @@ async function reportCallback(job, data) {
 }
 
 function buildYtDlpBaseArgs(clientSpec) {
-  const args = ['--js-runtimes', 'deno,node', '--no-warnings'];
-  const pluginDir = process.env.BGUTIL_PLUGIN_DIR;
-  if (pluginDir && fs.existsSync(pluginDir)) {
-    args.push('--plugin-dirs', pluginDir);
-  }
+  const args = ['-v', '--js-runtimes', 'deno,node', '--no-warnings'];
   args.push('--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416');
   if (clientSpec) {
     args.push('--extractor-args', `youtube:player_client=${clientSpec}`);
@@ -291,7 +287,7 @@ function buildYtDlpBaseArgs(clientSpec) {
 }
 
 function runYtDlpWithRetry(ytArgs) {
-  const attempts = [null, 'mweb,tv', 'android_vr,web'];
+  const attempts = ['mweb,web', 'tv,android_vr', null];
   for (let i = 0; i < attempts.length; i++) {
     const base = buildYtDlpBaseArgs(attempts[i]);
     const ok = runCmd('yt-dlp', [...base, ...ytArgs], i < attempts.length - 1);
