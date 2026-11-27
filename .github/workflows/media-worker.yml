@@ -49,11 +49,11 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Install FFmpeg and latest yt-dlp
+      - name: Install FFmpeg, yt-dlp, and bgutil PO Token plugin
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
-          python3 -m pip install --upgrade --break-system-packages yt-dlp
+          python3 -m pip install --upgrade --break-system-packages yt-dlp bgutil-ytdlp-pot-provider
 
       - name: Start bgutil PO Token provider server
         run: |
