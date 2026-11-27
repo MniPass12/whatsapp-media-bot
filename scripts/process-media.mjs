@@ -28,20 +28,26 @@ function parseJobPayload() {
     }
   }
 
+  const meta = payload.meta && typeof payload.meta === 'object' ? payload.meta : {};
+
   return {
     job_id: payload.job_id || process.env.INPUT_JOB_ID || `gh_${Date.now()}`,
     to: payload.to || process.env.INPUT_TO || '',
     mode: payload.mode || process.env.INPUT_MODE || 'video',
-    source: payload.source || 'youtube',
+    source: payload.source || meta.source || 'youtube',
     video_url: payload.video_url || process.env.INPUT_VIDEO_URL || '',
-    referer_url: payload.referer_url || '',
+    referer_url: payload.referer_url || meta.referer_url || '',
     title: payload.title || '',
     quality: payload.quality || process.env.INPUT_QUALITY || 'auto',
-    query: payload.query || '',
-    sort: payload.sort === 'recent' ? 'recent' : 'top',
-    force: Boolean(payload.force),
-    page: Number(payload.page || 1),
-    seen_urls: Array.isArray(payload.seen_urls) ? payload.seen_urls : [],
+    query: payload.query || meta.query || '',
+    sort: (payload.sort || meta.sort) === 'recent' ? 'recent' : 'top',
+    force: Boolean(payload.force ?? meta.force),
+    page: Number(payload.page || meta.page || 1),
+    seen_urls: Array.isArray(payload.seen_urls)
+      ? payload.seen_urls
+      : Array.isArray(meta.seen_urls)
+        ? meta.seen_urls
+        : [],
     reply_to_wamid: payload.reply_to_wamid || undefined,
     callback_url:
       payload.callback_url || process.env.WORKER_CALLBACK_URL || FALLBACK_WORKER_CALLBACK_URL,
