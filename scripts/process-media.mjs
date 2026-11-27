@@ -271,14 +271,14 @@ async function reportCallback(job, data) {
   }
 }
 
-function buildYtDlpBaseArgs(clientSpec) {
-  const args = ['-v', '--js-runtimes', 'deno', '--no-warnings'];
+function buildYtDlpBaseArgs(clientSpec, useCookies = true) {
+  const args = ['-v', '--js-runtimes', 'deno', '--remote-components', 'ejs:github'];
   args.push('--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416');
   if (clientSpec) {
     args.push('--extractor-args', `youtube:player_client=${clientSpec}`);
   }
 
-  if (process.env.YT_COOKIES?.trim()) {
+  if (useCookies && process.env.YT_COOKIES?.trim()) {
     const cookiePath = '/tmp/yt_cookies.txt';
     fs.writeFileSync(cookiePath, process.env.YT_COOKIES.trim(), 'utf8');
     args.push('--cookies', cookiePath);
@@ -287,12 +287,19 @@ function buildYtDlpBaseArgs(clientSpec) {
 }
 
 function runYtDlpWithRetry(ytArgs) {
-  const attempts = ['mweb,web', 'tv,android_vr', null];
+  const attempts = [
+    { client: 'tv,web_safari', cookies: true },
+    { client: null, cookies: true },
+    { client: 'mweb,web', cookies: true },
+    { client: 'tv_simply,android_vr', cookies: false },
+    { client: 'ios,web_safari', cookies: false },
+  ];
   for (let i = 0; i < attempts.length; i++) {
-    const base = buildYtDlpBaseArgs(attempts[i]);
+    const { client, cookies } = attempts[i];
+    const base = buildYtDlpBaseArgs(client, cookies);
     const ok = runCmd('yt-dlp', [...base, ...ytArgs], i < attempts.length - 1);
     if (ok) return;
-    console.warn(`yt-dlp attempt ${i + 1} failed, trying fallback player client...`);
+    console.warn(`yt-dlp attempt ${i + 1} (client=${client || 'default'}, cookies=${cookies}) failed, trying next fallback...`);
   }
   throw new Error('yt-dlp exited with code 1 across all player clients');
 }
@@ -351,20 +358,33 @@ async function main() {
       throw new Error('Missing video_url in payload');
     }
 
-    // Fetch title if missing
+    // Fetch title if missing (fast oEmbed first, yt-dlp fallback)
     let videoTitle = job.title;
     if (!videoTitle) {
       try {
-        videoTitle = execFileSync('yt-dlp', [
-          ...buildYtDlpBaseArgs(null),
-          '--get-title',
-          '--no-playlist',
-          job.video_url,
-        ])
-          .toString('utf8')
-          .trim();
+        const oembedRes = await fetch(
+          `https://www.youtube.com/oembed?url=${encodeURIComponent(job.video_url)}&format=json`
+        );
+        if (oembedRes.ok) {
+          const oembed = await oembedRes.json();
+          videoTitle = String(oembed.title || '').trim();
+        }
       } catch {
-        videoTitle = 'YouTube Media';
+        // fallback below
+      }
+      if (!videoTitle) {
+        try {
+          videoTitle = execFileSync('yt-dlp', [
+            ...buildYtDlpBaseArgs(null, true),
+            '--get-title',
+            '--no-playlist',
+            job.video_url,
+          ])
+            .toString('utf8')
+            .trim();
+        } catch {
+          videoTitle = 'YouTube Media';
+        }
       }
     }
 
@@ -440,7 +460,7 @@ async function main() {
     const rawTemplate = path.join(workDir, 'source.%(ext)s');
     runYtDlpWithRetry([
       '-f',
-      'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best',
+      'bv*[height<=720]+ba/b[height<=720]/bv*+ba/b',
       '--merge-output-format',
       'mp4',
       '--no-playlist',
