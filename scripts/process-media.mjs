@@ -272,7 +272,7 @@ async function reportCallback(job, data) {
 }
 
 function buildYtDlpBaseArgs(clientSpec) {
-  const args = ['-v', '--js-runtimes', 'deno,node', '--no-warnings'];
+  const args = ['-v', '--js-runtimes', 'deno', '--no-warnings'];
   args.push('--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416');
   if (clientSpec) {
     args.push('--extractor-args', `youtube:player_client=${clientSpec}`);
