@@ -1,0 +1,64 @@
+name: WhatsApp Media Offload Worker
+
+on:
+  repository_dispatch:
+    types: [whatsapp_media_job]
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: "YouTube URL to download and compress"
+        required: true
+        type: string
+      to:
+        description: "WhatsApp opaque recipient user:<id>"
+        required: true
+        type: string
+      mode:
+        description: "Media mode (video or audio)"
+        required: true
+        default: "video"
+        type: choice
+        options:
+          - video
+          - audio
+      quality:
+        description: "Quality preference (auto, 480p, 360p, audio)"
+        required: false
+        default: "auto"
+      job_id:
+        description: "Optional D1 tracking job ID"
+        required: false
+        default: "manual_dispatch"
+
+jobs:
+  process-media:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install FFmpeg and latest yt-dlp
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          python3 -m pip install --upgrade --break-system-packages yt-dlp
+
+      - name: Process and send WhatsApp media
+        env:
+          WHATSAPP_ACCESS_TOKEN: ${{ secrets.WHATSAPP_ACCESS_TOKEN }}
+          WORKER_CALLBACK_URL: ${{ secrets.WORKER_CALLBACK_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+          PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
+          INPUT_VIDEO_URL: ${{ inputs.video_url }}
+          INPUT_TO: ${{ inputs.to }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_QUALITY: ${{ inputs.quality }}
+          INPUT_JOB_ID: ${{ inputs.job_id }}
+        run: node scripts/process-media.mjs
