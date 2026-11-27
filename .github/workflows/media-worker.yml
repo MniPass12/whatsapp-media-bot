@@ -6,21 +6,22 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: "YouTube URL to download and compress"
-        required: true
+        description: "Media URL to download and compress"
+        required: false
         type: string
       to:
         description: "WhatsApp opaque recipient user:<id>"
         required: true
         type: string
       mode:
-        description: "Media mode (video or audio)"
+        description: "Media mode (video, audio, or emrandom)"
         required: true
         default: "video"
         type: choice
         options:
           - video
           - audio
+          - emrandom
       quality:
         description: "Quality preference (auto, 480p, 360p, audio)"
         required: false
