@@ -271,6 +271,36 @@ async function reportCallback(job, data) {
   }
 }
 
+function buildYtDlpBaseArgs(clientSpec) {
+  const args = ['--js-runtimes', 'deno,node', '--no-warnings'];
+  const pluginDir = process.env.BGUTIL_PLUGIN_DIR;
+  if (pluginDir && fs.existsSync(pluginDir)) {
+    args.push('--plugin-dirs', pluginDir);
+  }
+  args.push('--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416');
+  if (clientSpec) {
+    args.push('--extractor-args', `youtube:player_client=${clientSpec}`);
+  }
+
+  if (process.env.YT_COOKIES?.trim()) {
+    const cookiePath = '/tmp/yt_cookies.txt';
+    fs.writeFileSync(cookiePath, process.env.YT_COOKIES.trim(), 'utf8');
+    args.push('--cookies', cookiePath);
+  }
+  return args;
+}
+
+function runYtDlpWithRetry(ytArgs) {
+  const attempts = [null, 'mweb,tv', 'android_vr,web'];
+  for (let i = 0; i < attempts.length; i++) {
+    const base = buildYtDlpBaseArgs(attempts[i]);
+    const ok = runCmd('yt-dlp', [...base, ...ytArgs], i < attempts.length - 1);
+    if (ok) return;
+    console.warn(`yt-dlp attempt ${i + 1} failed, trying fallback player client...`);
+  }
+  throw new Error('yt-dlp exited with code 1 across all player clients');
+}
+
 async function main() {
   const job = parseJobPayload();
   if (!job.to || !job.to.startsWith('user:')) {
@@ -282,6 +312,7 @@ async function main() {
   try {
     if (job.mode === 'search') {
       const searchJson = execFileSync('yt-dlp', [
+        ...buildYtDlpBaseArgs(null),
         '--dump-json',
         '--flat-playlist',
         `ytsearch5:${job.query}`,
@@ -328,7 +359,12 @@ async function main() {
     let videoTitle = job.title;
     if (!videoTitle) {
       try {
-        videoTitle = execFileSync('yt-dlp', ['--get-title', '--no-playlist', job.video_url])
+        videoTitle = execFileSync('yt-dlp', [
+          ...buildYtDlpBaseArgs(null),
+          '--get-title',
+          '--no-playlist',
+          job.video_url,
+        ])
           .toString('utf8')
           .trim();
       } catch {
@@ -338,7 +374,7 @@ async function main() {
 
     if (job.mode === 'audio') {
       const rawAudioTemplate = path.join(workDir, 'source.%(ext)s');
-      runCmd('yt-dlp', [
+      runYtDlpWithRetry([
         '-f',
         'bestaudio/best',
         '--no-playlist',
@@ -406,7 +442,7 @@ async function main() {
 
     // Video mode with relative two-pass compression strictly < 16 MB
     const rawTemplate = path.join(workDir, 'source.%(ext)s');
-    runCmd('yt-dlp', [
+    runYtDlpWithRetry([
       '-f',
       'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best',
       '--merge-output-format',
