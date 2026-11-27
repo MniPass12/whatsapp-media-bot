@@ -332,9 +332,6 @@ async function main() {
         return;
       }
 
-      const lines = entries.map(
-        (e, i) => `${i + 1}. ${e.title}\n   https://www.youtube.com/watch?v=${e.id}`
-      );
       await reportCallback(job, {
         user_id: job.to,
         query: job.query,
@@ -346,11 +343,61 @@ async function main() {
           url: `https://www.youtube.com/watch?v=${e.id}`,
         })),
       });
-      await sendWhatsAppText(
-        job.to,
-        `Results for "${job.query}" (via yt-dlp):\n\n${lines.join('\n')}\n\nQuick actions: /play 1 · /audio 1 · /info 1 · /queue add 1`,
-        job.reply_to_wamid
+
+      const thumbFiles = await Promise.all(
+        entries.map(async (e, i) => {
+          try {
+            let imgRes = await fetch(`https://i.ytimg.com/vi/${e.id}/hqdefault.jpg`);
+            if (!imgRes.ok) {
+              imgRes = await fetch(`https://i.ytimg.com/vi/${e.id}/mqdefault.jpg`);
+            }
+            if (!imgRes.ok) return null;
+            const buf = Buffer.from(await imgRes.arrayBuffer());
+            const imgPath = path.join(workDir, `thumb_${i + 1}.jpg`);
+            fs.writeFileSync(imgPath, buf);
+            return imgPath;
+          } catch {
+            return null;
+          }
+        })
       );
+
+      for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        const metaLine = [
+          e.channel || e.uploader || 'YouTube',
+          e.duration_string || 'N/A',
+          e.view_count ? `${Number(e.view_count).toLocaleString('en-US')} views` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+
+        const caption = [
+          `*${i + 1}. ${e.title || 'Untitled'}*`,
+          metaLine,
+          `https://www.youtube.com/watch?v=${e.id}`,
+          '',
+          `Quick: /play ${i + 1} · /audio ${i + 1} · /info ${i + 1} · /queue add ${i + 1}`,
+        ].join('\n');
+
+        const quoteId = i === 0 ? job.reply_to_wamid : undefined;
+        if (thumbFiles[i]) {
+          try {
+            await uploadAndSendWhatsAppMedia(
+              job.to,
+              thumbFiles[i],
+              'image/jpeg',
+              'image',
+              caption,
+              quoteId
+            );
+            continue;
+          } catch {
+            // fallback to text
+          }
+        }
+        await sendWhatsAppText(job.to, caption, quoteId);
+      }
       return;
     }
 
