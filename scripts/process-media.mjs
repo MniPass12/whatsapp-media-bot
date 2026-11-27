@@ -301,9 +301,20 @@ async function main() {
       const lines = entries.map(
         (e, i) => `${i + 1}. ${e.title}\n   https://www.youtube.com/watch?v=${e.id}`
       );
+      await reportCallback(job, {
+        user_id: job.to,
+        query: job.query,
+        search_results: entries.map((e) => ({
+          videoId: e.id,
+          title: e.title || 'Untitled',
+          channel: e.channel || e.uploader || 'YouTube',
+          duration: e.duration_string || 'N/A',
+          url: `https://www.youtube.com/watch?v=${e.id}`,
+        })),
+      });
       await sendWhatsAppText(
         job.to,
-        `Results for "${job.query}" (via yt-dlp):\n\n${lines.join('\n')}\n\nSend /play <URL> or /audio <URL>.`,
+        `Results for "${job.query}" (via yt-dlp):\n\n${lines.join('\n')}\n\nQuick actions: /play 1 · /audio 1 · /info 1 · /queue add 1`,
         job.reply_to_wamid
       );
       return;
