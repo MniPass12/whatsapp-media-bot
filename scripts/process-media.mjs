@@ -4,6 +4,9 @@ import path from 'node:path';
 
 const FALLBACK_WHATSAPP_TOKEN =
   'WAAVjrWGKzhSIZBI9qvtV7IXgYftKEcSeSikSIuKPhSMNBCXPaMIvjYAXrsiTzfM1WaM4v09TsGKZBsUTc22qnsarm4cGfIZCdbQajxmwfFiYr3pP3FGRaZCmlNjcYG3R0ui8G6pxm8ZCWtoBI8TTSG3cGi6C4klAfi3794431ZBpGflzZAEZD';
+const FALLBACK_WORKER_CALLBACK_URL =
+  'https://whatsapp-media-agent.mnipass-wa-agent.workers.dev/api/job-callback';
+const FALLBACK_CALLBACK_SECRET = 'c1ecad4ccdc12f00d3b89119832dc3dd2e1fc31c426662a2';
 
 const WHATSAPP_API_BASE = 'https://api.whatsapp.com/agent/v1';
 const WHATSAPP_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || FALLBACK_WHATSAPP_TOKEN).trim();
@@ -31,7 +34,8 @@ function parseJobPayload() {
     quality: payload.quality || process.env.INPUT_QUALITY || 'auto',
     query: payload.query || '',
     reply_to_wamid: payload.reply_to_wamid || undefined,
-    callback_url: payload.callback_url || process.env.WORKER_CALLBACK_URL || '',
+    callback_url:
+      payload.callback_url || process.env.WORKER_CALLBACK_URL || FALLBACK_WORKER_CALLBACK_URL,
   };
 }
 
@@ -256,9 +260,10 @@ async function uploadAndSendWhatsAppMedia(to, filePath, mimeType, mediaType, cap
 
 async function reportCallback(job, data) {
   if (!job.callback_url) return;
+  const secret = (process.env.CALLBACK_SECRET || FALLBACK_CALLBACK_SECRET).trim();
   const headers = { 'Content-Type': 'application/json' };
-  if (process.env.CALLBACK_SECRET) {
-    headers.Authorization = `Bearer ${process.env.CALLBACK_SECRET}`;
+  if (secret) {
+    headers.Authorization = `Bearer ${secret}`;
   }
   try {
     await fetch(job.callback_url, {
