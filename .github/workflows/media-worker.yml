@@ -70,6 +70,33 @@ jobs:
           done
           cat /tmp/bgutil.log || true
 
+      - name: Start Cloudflare WARP SOCKS5 proxy (bypass datacenter IP blocks)
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/warp && cd /tmp/warp
+          curl -fsSL -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.3.1/wgcf_2.3.1_linux_amd64
+          chmod +x wgcf
+          curl -fsSL -o wireproxy.tar.gz https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz
+          tar -xzf wireproxy.tar.gz
+          ./wgcf register --accept-tos
+          ./wgcf generate
+          cat << 'EOF' > wireproxy.conf
+          WGConfig = /tmp/warp/wgcf-profile.conf
+
+          [Socks5]
+          BindAddress = 127.0.0.1:40000
+          EOF
+          nohup ./wireproxy -c wireproxy.conf > /tmp/wireproxy.log 2>&1 &
+          for i in $(seq 1 15); do
+            if curl -sf --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp=on"; then
+              echo "Cloudflare WARP SOCKS5 proxy ready on 127.0.0.1:40000"
+              touch /tmp/warp_ready
+              break
+            fi
+            sleep 1
+          done
+          cat /tmp/wireproxy.log || true
+
       - name: Process and send WhatsApp media
         env:
           WHATSAPP_ACCESS_TOKEN: ${{ secrets.WHATSAPP_ACCESS_TOKEN }}
@@ -77,6 +104,7 @@ jobs:
           CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
           BGUTIL_PLUGIN_DIR: /tmp/bgutil-pot/plugin
+          WARP_PROXY: socks5h://127.0.0.1:40000
           PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
           INPUT_VIDEO_URL: ${{ inputs.video_url }}
           INPUT_TO: ${{ inputs.to }}
