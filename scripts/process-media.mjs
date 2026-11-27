@@ -271,8 +271,15 @@ async function reportCallback(job, data) {
   }
 }
 
-function buildYtDlpBaseArgs(clientSpec, useCookies = true) {
+function isWarpReady() {
+  return Boolean(process.env.WARP_PROXY && fs.existsSync('/tmp/warp_ready'));
+}
+
+function buildYtDlpBaseArgs(clientSpec, useCookies = true, proxyUrl = null) {
   const args = ['-v', '--js-runtimes', 'deno', '--remote-components', 'ejs:github'];
+  if (proxyUrl) {
+    args.push('--proxy', proxyUrl);
+  }
   args.push('--extractor-args', 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416');
   if (clientSpec) {
     args.push('--extractor-args', `youtube:player_client=${clientSpec}`);
@@ -287,19 +294,30 @@ function buildYtDlpBaseArgs(clientSpec, useCookies = true) {
 }
 
 function runYtDlpWithRetry(ytArgs) {
-  const attempts = [
-    { client: 'tv,web_safari', cookies: true },
-    { client: null, cookies: true },
-    { client: 'mweb,web', cookies: true },
-    { client: 'tv_simply,android_vr', cookies: false },
-    { client: 'ios,web_safari', cookies: false },
-  ];
+  const warpProxy = isWarpReady() ? process.env.WARP_PROXY : null;
+  const attempts = [];
+  if (warpProxy) {
+    attempts.push(
+      { client: null, cookies: false, proxy: warpProxy },
+      { client: 'tv_simply,android_vr', cookies: false, proxy: warpProxy },
+      { client: 'ios,web_safari', cookies: false, proxy: warpProxy },
+      { client: 'tv,web_safari', cookies: true, proxy: warpProxy }
+    );
+  }
+  attempts.push(
+    { client: 'tv,web_safari', cookies: true, proxy: null },
+    { client: null, cookies: true, proxy: null },
+    { client: 'tv_simply,android_vr', cookies: false, proxy: null }
+  );
+
   for (let i = 0; i < attempts.length; i++) {
-    const { client, cookies } = attempts[i];
-    const base = buildYtDlpBaseArgs(client, cookies);
+    const { client, cookies, proxy } = attempts[i];
+    const base = buildYtDlpBaseArgs(client, cookies, proxy);
     const ok = runCmd('yt-dlp', [...base, ...ytArgs], i < attempts.length - 1);
     if (ok) return;
-    console.warn(`yt-dlp attempt ${i + 1} (client=${client || 'default'}, cookies=${cookies}) failed, trying next fallback...`);
+    console.warn(
+      `yt-dlp attempt ${i + 1} (client=${client || 'default'}, cookies=${cookies}, proxy=${proxy ? 'warp' : 'direct'}) failed, trying next fallback...`
+    );
   }
   throw new Error('yt-dlp exited with code 1 across all player clients');
 }
