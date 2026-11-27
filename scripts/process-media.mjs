@@ -40,8 +40,11 @@ function parseJobPayload() {
     title: payload.title || '',
     quality: payload.quality || process.env.INPUT_QUALITY || 'auto',
     query: payload.query || meta.query || '',
-    sort: (payload.sort || meta.sort) === 'recent' ? 'recent' : 'top',
+    sort: ['recent', 'top', 'random'].includes(payload.sort || meta.sort)
+      ? (payload.sort || meta.sort)
+      : 'top',
     force: Boolean(payload.force ?? meta.force),
+    count: Math.min(Math.max(Number(payload.count || meta.count || 1), 1), 20),
     page: Number(payload.page || meta.page || 1),
     seen_urls: Array.isArray(payload.seen_urls)
       ? payload.seen_urls
@@ -198,6 +201,10 @@ function encodeTwoPassVideo(inputPath, outputPath, durationSec, targetBytes, qua
   ]);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function sendWhatsAppText(to, body, replyToWamid) {
   const payload = {
     messaging_product: 'whatsapp',
@@ -208,41 +215,58 @@ async function sendWhatsAppText(to, body, replyToWamid) {
   if (replyToWamid) {
     payload.context = { message_id: replyToWamid };
   }
-  const res = await fetch(`${WHATSAPP_API_BASE}/messages`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(`${WHATSAPP_API_BASE}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) return;
+    if ((res.status === 429 || res.status === 503) && attempt < 3) {
+      await sleep(3000 * attempt);
+      continue;
+    }
     console.error('WhatsApp text send failed:', res.status, await res.text());
+    return;
   }
 }
 
 async function uploadAndSendWhatsAppMedia(to, filePath, mimeType, mediaType, caption, replyToWamid) {
   const bytes = fs.readFileSync(filePath);
   const blob = new Blob([bytes], { type: mimeType });
-  const form = new FormData();
-  form.append('messaging_product', 'whatsapp');
-  form.append('type', mimeType);
-  form.append('file', blob, path.basename(filePath));
 
-  const uploadRes = await fetch(`${WHATSAPP_API_BASE}/media`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-    },
-    body: form,
-  });
+  let mediaId = null;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', mimeType);
+    form.append('file', blob, path.basename(filePath));
 
-  if (!uploadRes.ok) {
+    const uploadRes = await fetch(`${WHATSAPP_API_BASE}/media`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      body: form,
+    });
+
+    if (uploadRes.ok) {
+      const json = await uploadRes.json();
+      mediaId = json.id;
+      break;
+    }
+
     const errText = await uploadRes.text();
+    if ((uploadRes.status === 429 || uploadRes.status === 503) && attempt < 4) {
+      await sleep(4000 * attempt);
+      continue;
+    }
     throw new Error(`WhatsApp media upload HTTP ${uploadRes.status}: ${errText}`);
   }
 
-  const { id: mediaId } = await uploadRes.json();
   const msgPayload = {
     messaging_product: 'whatsapp',
     to,
@@ -256,17 +280,25 @@ async function uploadAndSendWhatsAppMedia(to, filePath, mimeType, mediaType, cap
     msgPayload.context = { message_id: replyToWamid };
   }
 
-  const sendRes = await fetch(`${WHATSAPP_API_BASE}/messages`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-    },
-    body: JSON.stringify(msgPayload),
-  });
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const sendRes = await fetch(`${WHATSAPP_API_BASE}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+      },
+      body: JSON.stringify(msgPayload),
+    });
 
-  if (!sendRes.ok) {
+    if (sendRes.ok) {
+      return mediaId;
+    }
+
     const errText = await sendRes.text();
+    if ((sendRes.status === 429 || sendRes.status === 503) && attempt < 4) {
+      await sleep(4000 * attempt);
+      continue;
+    }
     throw new Error(`WhatsApp media message HTTP ${sendRes.status}: ${errText}`);
   }
 
@@ -555,9 +587,25 @@ function parseEromeAlbumHtml(html, albumUrl) {
   return { albumId, albumUrl, title, uploader, videos };
 }
 
-async function processAndSendVideoFile(job, workDir, sourceFile, videoTitle, originalUrlForFallback) {
+function shuffleArray(arr) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+async function processAndSendVideoFile(
+  job,
+  workDir,
+  sourceFile,
+  videoTitle,
+  originalUrlForFallback,
+  options = {}
+) {
   const meta = probeMedia(sourceFile);
-  const outMp4 = path.join(workDir, 'whatsapp_ready.mp4');
+  const outMp4 = path.join(workDir, `whatsapp_ready_${Date.now()}.mp4`);
 
   const alreadyCompliant =
     meta.sizeBytes <= 15_400_000 &&
@@ -570,11 +618,11 @@ async function processAndSendVideoFile(job, workDir, sourceFile, videoTitle, ori
   } else {
     encodeTwoPassVideo(sourceFile, outMp4, meta.durationSec, TARGET_BUDGET_BYTES, job.quality);
 
-    let outSize = fs.statSync(outMp4).size;
+    const outSize = fs.statSync(outMp4).size;
     if (outSize > HARD_MAX_BYTES) {
       console.log(`Overshoot (${(outSize / 1e6).toFixed(2)} MB > 15.9 MB). Retrying tighter relative pass...`);
       const tighterBudget = Math.floor(TARGET_BUDGET_BYTES * (TARGET_BUDGET_BYTES / outSize) * 0.88);
-      const retryMp4 = path.join(workDir, 'whatsapp_retry.mp4');
+      const retryMp4 = path.join(workDir, `whatsapp_retry_${Date.now()}.mp4`);
       encodeTwoPassVideo(sourceFile, retryMp4, meta.durationSec, tighterBudget, job.quality);
       fs.renameSync(retryMp4, outMp4);
     }
@@ -585,25 +633,29 @@ async function processAndSendVideoFile(job, workDir, sourceFile, videoTitle, ori
     await sendWhatsAppText(
       job.to,
       `Video "${videoTitle}" is too long (${Math.round(meta.durationSec / 60)} min) to fit in a 16 MB MP4 upload even at minimum bitrate.\nWatch directly: ${originalUrlForFallback}`,
-      job.reply_to_wamid
+      options.skipCallback ? undefined : job.reply_to_wamid
     );
-    await reportCallback(job, {
-      status: 'too_long_fallback',
-      title: videoTitle,
-      source_size_bytes: meta.sizeBytes,
-      compressed_size_bytes: finalBytes,
-      duration_sec: Math.round(meta.durationSec),
-      error_message: 'Duration exceeds minimum viable 16 MB MP4 bitrate',
-    });
-    return;
+    if (!options.skipCallback) {
+      await reportCallback(job, {
+        status: 'too_long_fallback',
+        title: videoTitle,
+        source_size_bytes: meta.sizeBytes,
+        compressed_size_bytes: finalBytes,
+        duration_sec: Math.round(meta.durationSec),
+        error_message: 'Duration exceeds minimum viable 16 MB MP4 bitrate',
+      });
+    }
+    fs.rmSync(outMp4, { force: true });
+    return { sent: false, sourceBytes: meta.sizeBytes, compressedBytes: finalBytes, durationSec: meta.durationSec, mediaId: null };
   }
 
   const origMb = (meta.sizeBytes / 1e6).toFixed(1);
   const finalMb = (finalBytes / 1e6).toFixed(2);
+  const prefix = options.prefixLabel ? `${options.prefixLabel} ` : '';
   const caption =
     alreadyCompliant && meta.sizeBytes <= HARD_MAX_BYTES
-      ? `${videoTitle}\n${finalMb} MB (under WhatsApp 16 MB limit)`
-      : `${videoTitle}\nCompressed ${origMb} MB -> ${finalMb} MB (WhatsApp 16 MB limit)`;
+      ? `${prefix}${videoTitle}\n${finalMb} MB (under WhatsApp 16 MB limit)`
+      : `${prefix}${videoTitle}\nCompressed ${origMb} MB -> ${finalMb} MB (WhatsApp 16 MB limit)`;
 
   const mediaId = await uploadAndSendWhatsAppMedia(
     job.to,
@@ -611,17 +663,29 @@ async function processAndSendVideoFile(job, workDir, sourceFile, videoTitle, ori
     'video/mp4',
     'video',
     caption,
-    job.reply_to_wamid
+    options.replyToWamid
   );
 
-  await reportCallback(job, {
-    status: 'completed',
-    title: videoTitle,
-    source_size_bytes: meta.sizeBytes,
-    compressed_size_bytes: finalBytes,
-    duration_sec: Math.round(meta.durationSec),
-    media_id: mediaId,
-  });
+  fs.rmSync(outMp4, { force: true });
+
+  if (!options.skipCallback) {
+    await reportCallback(job, {
+      status: 'completed',
+      title: videoTitle,
+      source_size_bytes: meta.sizeBytes,
+      compressed_size_bytes: finalBytes,
+      duration_sec: Math.round(meta.durationSec),
+      media_id: mediaId,
+    });
+  }
+
+  return {
+    sent: true,
+    sourceBytes: meta.sizeBytes,
+    compressedBytes: finalBytes,
+    durationSec: meta.durationSec,
+    mediaId,
+  };
 }
 
 async function main() {
@@ -744,51 +808,229 @@ async function main() {
       return;
     }
 
-    if (job.mode === 'emrandom') {
-      const randomPage = Math.floor(Math.random() * 6) + 1;
-      const listingUrl = job.query
-        ? `https://www.erome.com/search?q=${encodeURIComponent(job.query)}&page=${Math.floor(Math.random() * 3) + 1}`
-        : `https://www.erome.com/${Math.random() < 0.5 ? 'explore' : 'explore/new'}?page=${randomPage}`;
-      const listHtml = curlFetchText(listingUrl, 'https://www.erome.com/');
-      if (!listHtml) {
-        throw new Error('Could not reach Erome explore listing');
-      }
+    if (job.mode === 'embulk') {
+      const targetCount = Math.min(Math.max(Number(job.count || 5), 1), 20);
+      const seenMp4 = new Set();
+      const pages =
+        job.sort === 'random' ? shuffleArray([1, 2, 3, 4, 5, 6]) : [1, 2, 3, 4, 5, 6];
 
-      const albums = parseEromeSearchHtml(listHtml).filter((a) => !a.hasZeroVideosHint);
-      for (let i = albums.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [albums[i], albums[j]] = [albums[j], albums[i]];
-      }
+      let sentCount = 0;
+      let totalSourceBytes = 0;
+      let totalCompressedBytes = 0;
+      let totalDurationSec = 0;
+      let lastMediaId = null;
 
-      let picked = null;
-      for (const album of albums.slice(0, 16)) {
-        const albumHtml = curlFetchText(album.albumUrl, listingUrl);
-        if (!albumHtml) continue;
-        const parsed = parseEromeAlbumHtml(albumHtml, album.albumUrl);
-        for (const vid of parsed.videos) {
-          const sizeBytes = curlProbeSize(vid.mp4Url, album.albumUrl);
-          if (sizeBytes && sizeBytes >= 51_200 && sizeBytes <= HARD_MAX_BYTES) {
-            picked = {
-              mp4Url: vid.mp4Url,
-              albumUrl: album.albumUrl,
-              title: parsed.title || album.title,
-            };
-            break;
+      for (const pageNum of pages) {
+        if (sentCount >= targetCount) break;
+        const sortParam = job.sort === 'recent' ? '&o=new' : '';
+        const searchUrl = `https://www.erome.com/search?q=${encodeURIComponent(job.query)}${sortParam}&page=${pageNum}`;
+        const listHtml = curlFetchText(searchUrl, 'https://www.erome.com/');
+        if (!listHtml) continue;
+
+        let albums = parseEromeSearchHtml(listHtml).filter((a) => !a.hasZeroVideosHint);
+        if (!albums.length) continue;
+        if (job.sort === 'random') {
+          albums = shuffleArray(albums);
+        }
+
+        for (const album of albums) {
+          if (sentCount >= targetCount) break;
+          const albumHtml = curlFetchText(album.albumUrl, searchUrl);
+          if (!albumHtml) continue;
+
+          const parsed = parseEromeAlbumHtml(albumHtml, album.albumUrl);
+          if (!parsed.videos.length) continue;
+
+          const videos = job.sort === 'random' ? shuffleArray(parsed.videos) : parsed.videos;
+          for (const vid of videos) {
+            if (sentCount >= targetCount) break;
+            if (seenMp4.has(vid.mp4Url)) continue;
+            seenMp4.add(vid.mp4Url);
+
+            if (!job.force) {
+              const sizeBytes = curlProbeSize(vid.mp4Url, album.albumUrl);
+              if (!sizeBytes || sizeBytes < 51_200 || sizeBytes > HARD_MAX_BYTES) {
+                continue;
+              }
+            }
+
+            const tempFile = path.join(workDir, `bulk_${sentCount + 1}.mp4`);
+            try {
+              if (!curlDownloadFile(vid.mp4Url, album.albumUrl, tempFile)) {
+                continue;
+              }
+              const res = await processAndSendVideoFile(
+                job,
+                workDir,
+                tempFile,
+                parsed.title || album.title,
+                album.albumUrl,
+                {
+                  skipCallback: true,
+                  prefixLabel: `[${sentCount + 1}/${targetCount}]`,
+                  replyToWamid: sentCount === 0 ? job.reply_to_wamid : undefined,
+                }
+              );
+              if (res.sent) {
+                sentCount++;
+                totalSourceBytes += res.sourceBytes;
+                totalCompressedBytes += res.compressedBytes;
+                totalDurationSec += res.durationSec;
+                lastMediaId = res.mediaId;
+                if (sentCount < targetCount) {
+                  await sleep(2500);
+                }
+              }
+            } catch (err) {
+              console.warn(`Skipping bulk item ${vid.mp4Url}:`, err instanceof Error ? err.message : err);
+            } finally {
+              fs.rmSync(tempFile, { force: true });
+            }
           }
         }
-        if (picked) break;
       }
 
-      if (!picked) {
+      if (sentCount === 0) {
+        await sendWhatsAppText(
+          job.to,
+          job.force
+            ? `No downloadable videos found on Erome for "${job.query}".`
+            : `No videos under 16 MB found on Erome for "${job.query}". Try /embulk ${job.query} ${targetCount} force to compress larger videos.`,
+          job.reply_to_wamid
+        );
+        await reportCallback(job, {
+          status: 'failed',
+          title: `Bulk (0/${targetCount}): ${job.query}`,
+          error_message: 'No matching videos found',
+        });
+        return;
+      }
+
+      if (sentCount < targetCount) {
+        await sendWhatsAppText(
+          job.to,
+          `Bulk complete: sent ${sentCount}/${targetCount} available videos for "${job.query}".`,
+          job.reply_to_wamid
+        );
+      }
+
+      await reportCallback(job, {
+        status: 'completed',
+        title: `Bulk (${sentCount}/${targetCount} ${job.sort}${job.force ? ' force' : ''}): ${job.query}`,
+        source_size_bytes: totalSourceBytes,
+        compressed_size_bytes: totalCompressedBytes,
+        duration_sec: Math.round(totalDurationSec),
+        media_id: lastMediaId,
+      });
+      return;
+    }
+
+    if (job.mode === 'emrandom') {
+      const targetCount = Math.min(Math.max(Number(job.count || 1), 1), 20);
+      const seenMp4 = new Set();
+      const seenAlbums = new Set();
+      const explorePages = shuffleArray([1, 2, 3, 4, 5, 6, 7, 8]);
+
+      let sentCount = 0;
+      let totalSourceBytes = 0;
+      let totalCompressedBytes = 0;
+      let totalDurationSec = 0;
+      let lastMediaId = null;
+      let lastTitle = 'Random Erome (<16 MB)';
+
+      for (const pageNum of explorePages) {
+        if (sentCount >= targetCount) break;
+        const listingUrl = job.query
+          ? `https://www.erome.com/search?q=${encodeURIComponent(job.query)}&page=${Math.min(pageNum, 5)}`
+          : `https://www.erome.com/${Math.random() < 0.5 ? 'explore' : 'explore/new'}?page=${pageNum}`;
+        const listHtml = curlFetchText(listingUrl, 'https://www.erome.com/');
+        if (!listHtml) continue;
+
+        const albums = shuffleArray(
+          parseEromeSearchHtml(listHtml).filter((a) => !a.hasZeroVideosHint)
+        );
+
+        for (const album of albums.slice(0, 20)) {
+          if (sentCount >= targetCount) break;
+          if (seenAlbums.has(album.albumUrl)) continue;
+          seenAlbums.add(album.albumUrl);
+
+          const albumHtml = curlFetchText(album.albumUrl, listingUrl);
+          if (!albumHtml) continue;
+          const parsed = parseEromeAlbumHtml(albumHtml, album.albumUrl);
+          if (!parsed.videos.length) continue;
+
+          for (const vid of shuffleArray(parsed.videos)) {
+            if (sentCount >= targetCount) break;
+            if (seenMp4.has(vid.mp4Url)) continue;
+            seenMp4.add(vid.mp4Url);
+
+            const sizeBytes = curlProbeSize(vid.mp4Url, album.albumUrl);
+            if (!sizeBytes || sizeBytes < 51_200 || sizeBytes > HARD_MAX_BYTES) {
+              continue;
+            }
+
+            const tempFile = path.join(workDir, `random_${sentCount + 1}.mp4`);
+            try {
+              if (!curlDownloadFile(vid.mp4Url, album.albumUrl, tempFile)) {
+                continue;
+              }
+              const title = parsed.title || album.title;
+              lastTitle = title;
+              const res = await processAndSendVideoFile(
+                job,
+                workDir,
+                tempFile,
+                title,
+                album.albumUrl,
+                {
+                  skipCallback: true,
+                  prefixLabel: targetCount > 1 ? `[${sentCount + 1}/${targetCount}]` : undefined,
+                  replyToWamid: sentCount === 0 ? job.reply_to_wamid : undefined,
+                }
+              );
+              if (res.sent) {
+                sentCount++;
+                totalSourceBytes += res.sourceBytes;
+                totalCompressedBytes += res.compressedBytes;
+                totalDurationSec += res.durationSec;
+                lastMediaId = res.mediaId;
+                if (sentCount < targetCount) {
+                  await sleep(2500);
+                }
+              }
+            } catch (err) {
+              console.warn(`Skipping random item ${vid.mp4Url}:`, err instanceof Error ? err.message : err);
+            } finally {
+              fs.rmSync(tempFile, { force: true });
+            }
+          }
+        }
+      }
+
+      if (sentCount === 0) {
         throw new Error('No random video under 16 MB found across sampled albums');
       }
 
-      const sourceFile = path.join(workDir, 'source.mp4');
-      if (!curlDownloadFile(picked.mp4Url, picked.albumUrl, sourceFile)) {
-        throw new Error(`Failed downloading random video from ${picked.albumUrl}`);
+      if (targetCount > 1 && sentCount < targetCount) {
+        await sendWhatsAppText(
+          job.to,
+          `Sent ${sentCount}/${targetCount} random videos under 16 MB.`,
+          job.reply_to_wamid
+        );
       }
 
-      await processAndSendVideoFile(job, workDir, sourceFile, picked.title, picked.albumUrl);
+      await reportCallback(job, {
+        status: 'completed',
+        title:
+          targetCount > 1
+            ? `Random Bulk (${sentCount}/${targetCount} <16 MB${job.query ? `: ${job.query}` : ''})`
+            : lastTitle,
+        source_size_bytes: totalSourceBytes,
+        compressed_size_bytes: totalCompressedBytes,
+        duration_sec: Math.round(totalDurationSec),
+        media_id: lastMediaId,
+      });
       return;
     }
 
